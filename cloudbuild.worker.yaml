@@ -1,0 +1,9 @@
+substitutions:
+  _IMAGE: "europe-west6-docker.pkg.dev/$PROJECT_ID/mn-transcribe/worker:latest"
+
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-f', 'Dockerfile.worker', '-t', '$_IMAGE', '.']
+
+images:
+  - '$_IMAGE'

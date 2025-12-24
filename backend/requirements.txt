@@ -1,0 +1,30 @@
+# ---- Framework & API ----
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+pydantic==2.8.2
+
+# ---- Database & Queue ----
+SQLAlchemy==2.0.32
+psycopg[binary]==3.2.1
+redis==5.0.8
+
+# ---- Cloud & Storage ----
+boto3==1.34.162
+python-multipart==0.0.9
+
+# ---- Transcription / Audio ----
+ffmpeg-python==0.2.0
+srt==3.5.3
+
+# ---- Google Speech-to-Text v2 ----
+google-cloud-speech==2.26.0
+google-api-core==2.19.2
+
+# ---- GCS client ----
+google-cloud-storage==2.18.2
+google-auth==2.34.0
+
+# ---- Optional Utils ----
+requests==2.32.3
+python-dotenv==1.0.1
+

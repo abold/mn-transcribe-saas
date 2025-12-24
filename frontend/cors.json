@@ -1,0 +1,8 @@
+[
+  {
+    "origin": ["https://mn-transcribe-frontend-lk25jmati-thinkboldwithanar.vercel.app"],
+    "method": ["GET", "HEAD", "PUT", "OPTIONS"],
+    "responseHeader": ["Content-Type", "x-goog-resumable", "x-goog-meta-*", "x-goog-*"],
+    "maxAgeSeconds": 3600
+  }
+]

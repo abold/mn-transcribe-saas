@@ -1,0 +1,102 @@
+
+services:
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app}
+      POSTGRES_DB: ${POSTGRES_DB:-app}
+    ports:
+      - "5432:5432"
+    volumes:
+      - db:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    env_file: ../.env 
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY}
+      MINIO_API_CORS_ALLOW_ORIGIN: "http://192.168.1.107:3000,http://localhost:3000"
+      MINIO_API_CORS_ALLOW_METHODS: "GET,PUT,HEAD"
+      MINIO_API_CORS_ALLOW_HEADERS: "*"
+      MINIO_API_CORS_EXPOSE_HEADERS: "ETag"
+      MINIO_API_CORS_MAX_AGE: "3000"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://minio:9000/minio/health/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  createbucket:
+    image: minio/mc
+    depends_on:
+      minio:
+        condition: service_healthy
+    env_file: ../.env
+    environment:
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      S3_BUCKET: ${S3_BUCKET}
+    volumes:
+      - ./cors.xml:/tmp/cors.xml:ro
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 ${S3_ACCESS_KEY} ${S3_SECRET_KEY} &&
+      mc mb -p local/${S3_BUCKET} || true &&
+      mc anonymous set public local/${S3_BUCKET} || true &&
+      mc bucket cors set local/${S3_BUCKET} /tmp/cors.xml || true
+      "
+
+
+  backend:
+    build:
+      context: ../backend
+    env_file: ../.env
+    depends_on:
+      - db
+      - redis
+      - minio
+      - createbucket
+    ports:
+      - "8000:8000"
+    # Optional: Google-Creds in Container verfügbar machen
+    # volumes:
+    #   - ../gcp-key.json:/run/secrets/gcp-key.json:ro
+    # environment:
+    #   GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/gcp-key.json
+
+  worker:
+    build:
+      context: ../backend
+    env_file: ../.env
+    environment:
+      GCP_PROJECT_ID: clever-courier-474119-r9
+      GCP_REGION: global
+      STT_LANGUAGE: mn-MN
+      STT_MODEL: latest_long
+      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/gcp.json 
+    volumes:
+      - ../gcp-key.json:/run/secrets/gcp.json:ro  
+    depends_on:
+      - minio
+      - redis
+      - db
+    command: python -u worker.py
+
+
+
+volumes:
+  db:
+  minio:

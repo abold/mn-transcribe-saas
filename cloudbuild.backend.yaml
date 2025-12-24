@@ -1,0 +1,12 @@
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      [
+        'build',
+        '--no-cache',
+        '-t',
+        'europe-west6-docker.pkg.dev/$PROJECT_ID/mn-transcribe/backend:latest',
+        './backend'
+      ]
+images:
+  - 'europe-west6-docker.pkg.dev/$PROJECT_ID/mn-transcribe/backend:latest'

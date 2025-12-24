@@ -1,0 +1,128 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Mongolian Transcribe – Demo</title>
+<style>
+  :root { font-family: system-ui, sans-serif; }
+  body { max-width: 760px; margin: 40px auto; padding: 0 16px; }
+  .row { display:flex; gap:8px; align-items:center; margin: 8px 0; }
+  button { padding: 8px 12px; cursor: pointer; }
+  progress { width: 200px; }
+  #log { background:#111; color:#0f0; padding:12px; white-space:pre-wrap; min-height:120px; }
+  video { width:100%; max-height: 60vh; margin-top: 16px; background:#000; }
+</style>
+
+<h1>Mongolian Transcribe – Demo</h1>
+
+<div class="row">
+  <input id="file" type="file" accept="video/*,audio/*" />
+  <select id="engine">
+    <option value="google-stt-v2" selected>google-stt-v2</option>
+  </select>
+  <button id="start">Upload & Transcribe</button>
+  <progress id="p" value="0" max="100" style="display:none"></progress>
+</div>
+
+<pre id="log"></pre>
+
+<video id="player" controls>
+  <!-- track wird dynamisch gesetzt -->
+</video>
+
+<script>
+const API = "http://localhost:8000";
+const logEl = document.getElementById('log');
+const prog = document.getElementById('p');
+const player = document.getElementById('player');
+
+function log(...a){ logEl.textContent += a.join(' ') + "\n"; }
+
+async function uploadPresigned(url, file){
+  // Fortschritt (nur kosmetisch)
+  prog.style.display = '';
+  prog.value = 0;
+
+  // fetch PUT mit Stream & onprogress (XHR wäre genauer; hier: einfacher Upload ohne echten Progress)
+  const res = await fetch(url, {
+    method: 'PUT',
+    headers: { 'Content-Type': file.type || 'application/octet-stream' },
+    body: file
+  });
+  if(!res.ok){
+    throw new Error(`PUT failed: ${res.status} ${res.statusText}`);
+  }
+  prog.value = 100;
+}
+
+async function start(){
+  const f = document.getElementById('file').files[0];
+  const engine = document.getElementById('engine').value;
+  if(!f){ alert('Choose a file'); return; }
+
+  logEl.textContent = '';
+  prog.style.display = 'none';
+  player.removeAttribute('src');
+  const oldTrack = player.querySelector('track');
+  if (oldTrack) oldTrack.remove();
+
+  try {
+    log("1) presign…");
+    const pres = await fetch(`${API}/v1/presign`, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ filename: f.name, content_type: f.type || 'application/octet-stream' })
+    }).then(r=>r.json());
+    log("   key:", pres.key);
+
+    log("2) upload PUT…");
+    await uploadPresigned(pres.url, f);
+    log("   upload ok");
+
+    log("3) create job…");
+    const job = await fetch(`${API}/v1/jobs`, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ file_key: pres.file_key, engine })
+    }).then(r=>r.json());
+    log("   job id:", job.id);
+
+    log("4) poll…");
+    while(true){
+      const j = await fetch(`${API}/v1/jobs/${job.id}`).then(r=>r.json());
+      log("   status:", j.status);
+      if(j.status === 'failed'){
+        throw new Error(j.error_msg || 'Job failed');
+      }
+      if(j.status === 'done'){
+        // Bevorzugt presigned GET-URLs der API nutzen:
+        const fileUrl = j.file_url || pres.read_url; // Fallback auf read_url (nur falls Bucket public ist)
+        const srtUrl  = j.srt_url;
+
+        if(!fileUrl){ throw new Error("file_url missing"); }
+        if(!srtUrl){  log("WARN: srt_url missing"); }
+
+        // Video + SRT einbinden
+        player.src = fileUrl;
+        if(srtUrl){
+          const t = document.createElement('track');
+          t.kind = "subtitles";
+          t.label = "MN";
+          t.srclang = "mn";
+          t.src = srtUrl;
+          t.default = true;
+          player.appendChild(t);
+        }
+        log("✅ ready. duration_sec:", j.duration_sec);
+        break;
+      }
+      await new Promise(r=>setTimeout(r, 2000));
+    }
+  } catch (e){
+    log("ERROR:", e.message || e);
+    alert(e.message || e);
+  } finally {
+    prog.style.display = 'none';
+  }
+}
+
+document.getElementById('start').addEventListener('click', start);
+</script>

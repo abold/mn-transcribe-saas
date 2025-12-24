@@ -1,0 +1,24 @@
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY backend/requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
+RUN pip uninstall -y google || true
+RUN python -c "from google.cloud import storage; print('google-cloud-storage OK:', storage.__version__)"
+
+COPY backend/worker.py /app/worker.py
+COPY backend/service.py /app/service.py
+
+COPY backend /app/backend
+
+ENV PYTHONUNBUFFERED=1
+
+CMD ["python", "-u", "worker.py"]
+
+
+ 
+
+

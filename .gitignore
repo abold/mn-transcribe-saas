@@ -1,0 +1,35 @@
+gcp-key.json
+gcp-key.json
+
+# secrets
+.env
+*.env
+gcp-key.json
+
+# local
+.venv/
+__pycache__/
+.DS_Store
+
+# node build artifacts
+node_modules/
+.next/
+.vercel/
+
+# --- generated / local ---
+.env
+*.env
+.venv/
+__pycache__/
+.DS_Store
+sample.wav
+
+# accidental CLI artifacts
+--*
+out.srt
+result.srt
+
+# node
+node_modules/
+.next/
+.vercel/
