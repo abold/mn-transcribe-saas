@@ -35,16 +35,26 @@ if not os.getenv("K_SERVICE"):
 DB_URL = os.getenv("DATABASE_URL", "sqlite:///./app.db")
 
 REDIS_URL = os.getenv("REDIS_URL")
-if os.getenv("K_SERVICE") and not REDIS_URL:
-    raise RuntimeError("REDIS_URL missing in Cloud Run environment")
 
-r = redis.from_url(REDIS_URL)
+# ✅ SAFE Redis init (never crash the whole API at import time)
+r = None
+if REDIS_URL:
+    try:
+        r = redis.from_url(REDIS_URL)
+    except Exception as e:
+        print("⚠️ REDIS init failed:", repr(e))
+        r = None
+else:
+    if os.getenv("K_SERVICE"):
+        print("⚠️ REDIS_URL missing in Cloud Run environment (API will run but queue endpoints will fail)")
+
 
 # ───────── Logging ─────────
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("mn-transcribe")
 
 QUEUE_KEY = os.getenv("REDIS_QUEUE_KEY", "mn:q")
+
 
 def mask_redis_url(url: str) -> str:
     if not url:
@@ -56,9 +66,8 @@ def mask_redis_url(url: str) -> str:
     return "***"
 
 
-
 # MinIO/S3 settings (nur relevant wenn STORAGE_PROVIDER=minio)
-S3_ENDPOINT   = os.getenv("S3_ENDPOINT", "http://minio:9000")         # internal
+S3_ENDPOINT   = os.getenv("S3_ENDPOINT", "http://minio:9000")             # internal
 PUBLIC_S3     = os.getenv("PUBLIC_S3_ENDPOINT", "http://localhost:9000")  # browser-visible
 
 S3_ACCESS_KEY = os.getenv("S3_ACCESS_KEY", "minioadmin")
@@ -96,7 +105,7 @@ app.add_middleware(
 
 
 # ───────────────────────────────
-# DB & Redis
+# DB
 # ───────────────────────────────
 engine = create_engine(
     DB_URL,
@@ -111,6 +120,7 @@ def is_postgres(url: str) -> bool:
         return make_url(url).get_backend_name().startswith("postgres")
     except Exception:
         return False
+
 
 with engine.begin() as c:
     if is_postgres(DB_URL):
@@ -185,6 +195,7 @@ def gcs_presign_put(file_key: str, content_type: str | None, expires_sec: int = 
         content_type=content_type or "application/octet-stream",
     )
 
+
 def gcs_presign_get(file_key: str, expires_sec: int = 3600) -> str:
     if not GCS_BUCKET:
         raise RuntimeError("GCS_BUCKET missing")
@@ -197,6 +208,7 @@ def gcs_presign_get(file_key: str, expires_sec: int = 3600) -> str:
         method="GET",
     )
 
+
 def _to_obj_key(k: str | None) -> str | None:
     if not k:
         return None
@@ -204,6 +216,7 @@ def _to_obj_key(k: str | None) -> str | None:
     if k.startswith(f"{BUCKET}/"):
         k = k[len(BUCKET) + 1:]
     return k
+
 
 def _presign_get_or_none(key: str | None) -> str | None:
     obj_key = _to_obj_key(key)
@@ -244,6 +257,7 @@ def _presign_get_or_none(key: str | None) -> str | None:
     except Exception:
         return None
 
+
 def _ffprobe_duration_seconds(path: str) -> float:
     cmd = [
         "ffprobe", "-v", "error",
@@ -258,6 +272,7 @@ def _ffprobe_duration_seconds(path: str) -> float:
     if not out:
         raise RuntimeError("ffprobe returned empty duration")
     return float(out)
+
 
 def _get_duration_from_storage(obj_key: str) -> float:
     suffix = ".bin"
@@ -291,6 +306,7 @@ def _get_duration_from_storage(obj_key: str) -> float:
 
         return _ffprobe_duration_seconds(tmp.name)
 
+
 def _safe_filename_base(name: str) -> str:
     # keep only safe characters; convert everything else (incl spaces) to underscores
     s = (name or "").strip()
@@ -299,26 +315,44 @@ def _safe_filename_base(name: str) -> str:
     s = re.sub(r"_+", "_", s).strip("._-")     # cleanup
     return s or "file"
 
+
+def _require_redis():
+    if r is None:
+        raise HTTPException(status_code=500, detail="Redis not configured on server")
+
+
 # ───────────────────────────────
 # Routes
 # ───────────────────────────────
-@app.get("/")
-def root():
-    return {"ok": True, "service": "mn-transcribe-api", "storage_provider": STORAGE_PROVIDER}
+
+@app.get("/v1/version")
+def version():
+    return {
+        "storage_provider": STORAGE_PROVIDER,
+        "queue_key": QUEUE_KEY,
+        "has_redis": r is not None,
+        "max_duration_sec": MAX_DURATION_SEC,
+        "git_sha": os.getenv("GIT_SHA", "unknown"),
+        "image": os.getenv("K_REVISION", "unknown"),
+    }
+
 
 @app.get("/v1/redis-ping")
 def redis_ping():
+    _require_redis()
     return {"redis": bool(r.ping())}
+
 
 @app.get("/v1/debug/queue-len")
 def queue_len():
+    _require_redis()
     return {"queue_key": QUEUE_KEY, "len": r.llen(QUEUE_KEY)}
-
 
 
 class PresignIn(BaseModel):
     filename: str
     content_type: str | None = None
+
 
 @app.post("/v1/presign")
 def presign(p: PresignIn):
@@ -326,7 +360,6 @@ def presign(p: PresignIn):
     ext = ext or ".bin"
     safe_base = _safe_filename_base(base)
     object_key = f"{uuid.uuid4()}_{safe_base}{ext}"
-
 
     if STORAGE_PROVIDER == "gcs":
         if not GCS_BUCKET or not gcs_client:
@@ -376,14 +409,18 @@ class CreateJobIn(BaseModel):
             raise ValueError("file_key invalid")
         return v
 
+
 def _normalize_file_key(k: str) -> str:
     k = (k or "").lstrip("/")
     if k.startswith(f"{BUCKET}/"):
         k = k[len(BUCKET) + 1:]
     return k
 
+
 @app.post("/v1/jobs")
 def create_job(j: CreateJobIn):
+    _require_redis()
+
     fk = _normalize_file_key(j.file_key)
 
     try:
@@ -419,7 +456,8 @@ def create_job(j: CreateJobIn):
         logger.exception("enqueue: FAILED error=%r", e)
         raise HTTPException(status_code=500, detail=f"Redis enqueue failed: {type(e).__name__}: {e}")
 
-    return {"id": job_id, "status": "queued"}
+    return {"id": job_id, "status": "queued", "queue_key": QUEUE_KEY, "queue_len_after": new_len}
+
 
 
 @app.get("/v1/jobs/{job_id}")

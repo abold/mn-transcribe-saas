@@ -17,6 +17,7 @@ RUN python -c "from google.cloud import storage; print('google-cloud-storage OK:
 COPY . .
 EXPOSE 8080
 
-# Standard-CMD für den API-Container (der worker überschreibt das via docker-compose 'command')
-CMD ["sh", "-c", "uvicorn api:app --host 0.0.0.0 --port ${PORT:-8080}"]
+# Standard-CMD für den API-Container (der worker überschreibt das via docker-compose 'command') <--- this is previous comment 
+CMD exec uvicorn api:app --host 0.0.0.0 --port ${PORT:-8080}
+
 
