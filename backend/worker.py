@@ -110,13 +110,36 @@ def _transcribe_wav_sync_words(client, recognizer, cfg, wav_path: str, chunk_sta
     with open(wav_path, "rb") as f:
         content = f.read()
 
-    resp = client.recognize(
-        request=speech_v2.RecognizeRequest(
-            recognizer=recognizer,
-            config=cfg,
-            content=content,
+    # ---- Try with requested config (word time offsets) ----
+    try:
+        resp = client.recognize(
+            request=speech_v2.RecognizeRequest(
+                recognizer=recognizer,
+                config=cfg,
+                content=content,
+            )
         )
-    )
+    except Exception as e:
+        # If Google rejects some config fields, retry with a safer config
+        # (keeps word timestamps; drops anything that could be unsupported)
+        print("Recognize failed with cfg, retrying with minimal cfg. Error:", repr(e))
+
+        cfg_min = speech_v2.RecognitionConfig(
+            language_codes=list(getattr(cfg, "language_codes", []) or []),
+            model=getattr(cfg, "model", "") or "",
+            auto_decoding_config=speech_v2.AutoDetectDecodingConfig(),
+            features=RecognitionFeatures(
+                enable_word_time_offsets=True,
+            ),
+        )
+
+        resp = client.recognize(
+            request=speech_v2.RecognizeRequest(
+                recognizer=recognizer,
+                config=cfg_min,
+                content=content,
+            )
+        )
 
     words_out = []
     for res in getattr(resp, "results", []) or []:
@@ -307,13 +330,14 @@ def process(job: dict):
 
         print("STT config → project:", project, "region:", region, "lang:", lang, "model:", model, "recognizer:", recognizer)
 
+        # ✅ Minimal supported config:
+        # Keep word time offsets, drop automatic punctuation (was causing InvalidArgument)
         cfg = speech_v2.RecognitionConfig(
             language_codes=[lang],
             model=model,
             auto_decoding_config=speech_v2.AutoDetectDecodingConfig(),
             features=RecognitionFeatures(
                 enable_word_time_offsets=True,
-                enable_automatic_punctuation=True,
             ),
         )
 
