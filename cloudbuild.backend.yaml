@@ -1,12 +1,16 @@
+substitutions:
+  _TAG: "dev"
+
 steps:
-  - name: 'gcr.io/cloud-builders/docker'
+  - name: "gcr.io/cloud-builders/docker"
     args:
       [
-        'build',
-        '--no-cache',
-        '-t',
-        'europe-west6-docker.pkg.dev/clever-courier-474119-r9/mn-transcribe/backend:latest',
-        './backend'
+        "build",
+        "--no-cache",
+        "-t",
+        "europe-west6-docker.pkg.dev/clever-courier-474119-r9/mn-transcribe/backend:${_TAG}",
+        "./backend"
       ]
+
 images:
-  - 'europe-west6-docker.pkg.dev/clever-courier-474119-r9/mn-transcribe/backend:latest'
+  - "europe-west6-docker.pkg.dev/clever-courier-474119-r9/mn-transcribe/backend:${_TAG}"
