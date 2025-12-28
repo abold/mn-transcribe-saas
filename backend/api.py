@@ -10,6 +10,10 @@ import google.auth
 import google.auth.transport.requests
 from google.cloud import storage
 import stripe
+import requests
+import jwt
+from jwt import PyJWKClient
+
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -341,6 +345,121 @@ def _safe_filename_base(name: str) -> str:
 def _require_redis():
     if r is None:
         raise HTTPException(status_code=500, detail="Redis not configured on server")
+# ───────────────────────────────
+# Supabase Auth + Billing DB helpers
+# ───────────────────────────────
+
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+SUPABASE_JWT_AUD = os.getenv("SUPABASE_JWT_AUD", "authenticated").strip()
+SUPABASE_JWT_ISSUER = os.getenv("SUPABASE_JWT_ISSUER", "").strip()
+
+_jwks_client = None
+
+def _require_supabase():
+    missing = []
+    if not SUPABASE_URL:
+        missing.append("SUPABASE_URL")
+    if not SUPABASE_SERVICE_ROLE_KEY:
+        missing.append("SUPABASE_SERVICE_ROLE_KEY")
+    if missing:
+        raise HTTPException(status_code=500, detail=f"Supabase config missing: {', '.join(missing)}")
+
+def supabase_admin():
+    # imported lazily so local env issues don't break import
+    _require_supabase()
+    from supabase import create_client
+    return create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+
+def _get_jwks_client():
+    global _jwks_client
+    if _jwks_client is None:
+        if not SUPABASE_URL:
+            raise HTTPException(status_code=500, detail="SUPABASE_URL missing")
+        jwks_url = f"{SUPABASE_URL}/auth/v1/.well-known/jwks.json"
+        _jwks_client = PyJWKClient(jwks_url)
+    return _jwks_client
+
+def require_user(request: Request) -> dict:
+    """
+    Verifies Supabase JWT from Authorization: Bearer <token>
+    Returns: {"id": <uuid>, "email": <email or None>}
+    """
+    auth = request.headers.get("authorization") or request.headers.get("Authorization")
+    if not auth or not auth.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Missing Authorization Bearer token")
+
+    token = auth.split(" ", 1)[1].strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="Empty token")
+
+    try:
+        jwks_client = _get_jwks_client()
+        signing_key = jwks_client.get_signing_key_from_jwt(token).key
+
+        claims = jwt.decode(
+            token,
+            signing_key,
+            algorithms=["RS256"],
+            audience=SUPABASE_JWT_AUD,
+            options={"verify_exp": True},
+            issuer=SUPABASE_JWT_ISSUER or None,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"Invalid token: {type(e).__name__}")
+
+    user_id = claims.get("sub")
+    email = claims.get("email")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Token missing sub")
+
+    return {"id": user_id, "email": email}
+
+def get_plan_limits_for_user(user_id: str):
+    """
+    Reads subscriptions + plan_limits + usage_monthly from Supabase DB.
+    Requires the SQL tables we discussed:
+      subscriptions(user_id, plan, status, ...)
+      plan_limits(plan, monthly_seconds, max_file_seconds)
+      usage_monthly(user_id, month, seconds_used)
+    """
+    sb = supabase_admin()
+
+    # subscription row (defaults to free if missing/inactive)
+    sub_res = sb.table("subscriptions").select("plan,status").eq("user_id", user_id).limit(1).execute()
+    plan = "free"
+    status = "inactive"
+    if sub_res.data:
+        plan = (sub_res.data[0].get("plan") or "free").lower()
+        status = (sub_res.data[0].get("status") or "inactive").lower()
+    if status not in ("active", "trialing"):
+        plan = "free"
+
+    lim_res = sb.table("plan_limits").select("monthly_seconds,max_file_seconds").eq("plan", plan).limit(1).execute()
+    if lim_res.data:
+        monthly_seconds = int(lim_res.data[0]["monthly_seconds"])
+        max_file_seconds = int(lim_res.data[0]["max_file_seconds"])
+    else:
+        # fallback
+        monthly_seconds = 10 * 60
+        max_file_seconds = 60
+
+    # month key = first day of current month (UTC)
+    month = datetime.datetime.now(datetime.timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0).date().isoformat()
+    usage_res = sb.table("usage_monthly").select("seconds_used").eq("user_id", user_id).eq("month", month).limit(1).execute()
+    used_seconds = int(usage_res.data[0]["seconds_used"]) if usage_res.data else 0
+
+    return plan, status, monthly_seconds, max_file_seconds, used_seconds, month
+
+def reserve_usage_or_402(user_id: str, duration_sec: int):
+    """
+    Calls SQL RPC reserve_usage() for atomic reservation.
+    If you haven't created it yet, do that (I gave you SQL earlier).
+    """
+    sb = supabase_admin()
+    res = sb.rpc("reserve_usage", {"p_user_id": user_id, "p_duration_sec": int(duration_sec)}).execute()
+    if not res.data or not res.data[0].get("ok"):
+        raise HTTPException(status_code=402, detail="Monthly transcription limit reached")
 
 
 # ───────────────────────────────
@@ -440,8 +559,12 @@ def _normalize_file_key(k: str) -> str:
 
 
 @app.post("/v1/jobs")
-def create_job(j: CreateJobIn):
+def create_job(j: CreateJobIn, request: Request):
     _require_redis()
+
+    # ✅ require logged-in user
+    user = require_user(request)
+    user_id = user["id"]
 
     fk = _normalize_file_key(j.file_key)
 
@@ -450,8 +573,34 @@ def create_job(j: CreateJobIn):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Could not read media duration: {e}")
 
-    if duration > MAX_DURATION_SEC:
-        raise HTTPException(status_code=400, detail=f"Media too long: {duration:.1f}s (max {MAX_DURATION_SEC:.0f}s)")
+    # ✅ PLAN-BASED LIMITS with safe fallback
+    try:
+        plan, status, monthly_sec, max_file_sec, used_sec, month = get_plan_limits_for_user(user_id)
+
+        if duration > max_file_sec:
+            raise HTTPException(
+                status_code=402,
+                detail=f"File too long for plan '{plan}': {duration/60:.1f} min (max {max_file_sec/60:.0f} min)"
+            )
+
+        # ✅ Reserve monthly usage atomically (prevents spam abuse)
+        reserve_usage_or_402(user_id, int(duration))
+
+    except Exception as e:
+        # ✅ fallback until Supabase billing tables / RPC exist
+        logger.warning(
+            "Plan/usage lookup failed; falling back to MAX_DURATION_SEC. err=%r",
+            e,
+        )
+
+        if duration > MAX_DURATION_SEC:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Media too long: {duration:.1f}s (max {MAX_DURATION_SEC:.0f}s)"
+            )
+
+        plan = "free"
+        month = None
 
     job_id = str(uuid.uuid4())
 
@@ -464,7 +613,14 @@ def create_job(j: CreateJobIn):
             {"i": job_id, "k": fk, "e": j.engine, "d": duration},
         )
 
-    payload = {"job_id": job_id, "file_key": fk, "engine": j.engine}
+    payload = {
+        "job_id": job_id,
+        "file_key": fk,
+        "engine": j.engine,
+        "user_id": user_id,   # for traceability
+        "plan": plan,
+        "month": month,
+    }
 
     try:
         logger.info("enqueue: queue_key=%s redis_url=%s", QUEUE_KEY, mask_redis_url(REDIS_URL))
@@ -476,9 +632,17 @@ def create_job(j: CreateJobIn):
 
     except Exception as e:
         logger.exception("enqueue: FAILED error=%r", e)
-        raise HTTPException(status_code=500, detail=f"Redis enqueue failed: {type(e).__name__}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Redis enqueue failed: {type(e).__name__}: {e}",
+        )
 
-    return {"id": job_id, "status": "queued", "queue_key": QUEUE_KEY, "queue_len_after": new_len}
+    return {
+        "id": job_id,
+        "status": "queued",
+        "queue_key": QUEUE_KEY,
+        "queue_len_after": new_len,
+    }
 
 
 
@@ -506,6 +670,23 @@ def get_job(job_id: str):
         "file_url": file_url,
         "srt_url": srt_url,
     }
+
+class LimitsCheckIn(BaseModel):
+    duration_sec: int
+
+@app.post("/v1/limits/check")
+def limits_check(body: LimitsCheckIn, request: Request):
+    user = require_user(request)
+
+    plan, status, monthly_sec, max_file_sec, used_sec, _month = get_plan_limits_for_user(user["id"])
+
+    if body.duration_sec > max_file_sec:
+        raise HTTPException(status_code=402, detail=f"File too long for plan '{plan}' (max {max_file_sec//60} min)")
+
+    if used_sec + body.duration_sec > monthly_sec:
+        raise HTTPException(status_code=402, detail=f"Monthly limit reached for plan '{plan}'")
+
+    return {"ok": True, "plan": plan, "used_sec": used_sec, "monthly_sec": monthly_sec, "max_file_sec": max_file_sec}
 
 
 # ───────────────────────────────

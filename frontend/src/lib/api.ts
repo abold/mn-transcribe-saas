@@ -1,8 +1,7 @@
-const apiBase = () => {
-  const env =
-    process.env.NEXT_PUBLIC_API_BASE ||
-    process.env.NEXT_PUBLIC_API_URL;
+import { supabase } from "@/lib/supabaseClient";
 
+const apiBase = () => {
+  const env = process.env.NEXT_PUBLIC_API_BASE || process.env.NEXT_PUBLIC_API_URL;
   if (env) return env.replace(/\/$/, "");
 
   // Fallback (local dev only)
@@ -16,7 +15,7 @@ const apiBase = () => {
 export type PresignResp = {
   key: string;
   file_key: string; // object_key
-  url: string;      // presigned PUT
+  url: string; // presigned PUT
   read_url?: string; // (optional) older minio direct url
 };
 
@@ -29,14 +28,18 @@ export type JobView = {
   duration_sec?: number | null;
   srt_key?: string | null;
   error_msg?: string | null;
-  file_url?: string | null;  // presigned GET
-  srt_url?: string | null;   // presigned GET
+  file_url?: string | null; // presigned GET
+  srt_url?: string | null; // presigned GET
 };
 
 // ---- Small helpers ----
 async function jsonOrText(r: Response) {
   const t = await r.text();
-  try { return JSON.parse(t); } catch { return t; }
+  try {
+    return JSON.parse(t);
+  } catch {
+    return t;
+  }
 }
 
 function httpError(where: string, r: Response, body: unknown): never {
@@ -75,20 +78,33 @@ async function fetchWithTimeout(
   }
 }
 
+// ---- Auth helper (Supabase JWT) ----
+async function authHeaders(): Promise<Record<string, string>> {
+  const { data, error } = await supabase.auth.getSession();
+  if (error) throw new Error(error.message);
+
+  const token = data.session?.access_token;
+  if (!token) throw new Error("Not logged in");
+
+  return { Authorization: `Bearer ${token}` };
+}
+
 // ---- API calls ----
 export async function presign(filename: string, contentType?: string): Promise<PresignResp> {
   const r = await fetch(`${apiBase()}/v1/presign`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "Accept": "application/json" },
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
     body: JSON.stringify({
       filename,
       content_type: contentType || "application/octet-stream",
     }),
   });
+
   if (!r.ok) {
     const body = await jsonOrText(r);
     httpError("presign", r, body);
   }
+
   return r.json();
 }
 
@@ -129,30 +145,57 @@ export async function uploadFile(file: File, signal?: AbortSignal): Promise<Pres
   return p;
 }
 
+export async function checkLimits(duration_sec: number) {
+  const r = await fetch(`${apiBase()}/v1/limits/check`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      ...(await authHeaders()),
+    },
+    body: JSON.stringify({ duration_sec }),
+  });
+
+  if (!r.ok) {
+    const body = await jsonOrText(r);
+    httpError("checkLimits", r, body);
+  }
+
+  return r.json(); // { ok, plan, used_sec, monthly_sec, max_file_sec }
+}
+
 export async function createJob(file_key: string): Promise<{ id: string; status: JobStatus }> {
   const r = await fetch(`${apiBase()}/v1/jobs`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "Accept": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      ...(await authHeaders()),
+    },
     body: JSON.stringify({ file_key }), // ✅ remove engine
   });
+
   if (!r.ok) {
     const body = await jsonOrText(r);
     httpError("createJob", r, body);
   }
+
   return r.json();
 }
 
 export async function getJob(id: string, signal?: AbortSignal): Promise<JobView> {
   const r = await fetchWithTimeout(
     `${apiBase()}/v1/jobs/${id}`,
-    { method: "GET", headers: { "Accept": "application/json" }, cache: "no-store" },
+    { method: "GET", headers: { Accept: "application/json" }, cache: "no-store" },
     5000,
     signal
   );
+
   if (!r.ok) {
     const body = await jsonOrText(r);
     httpError("getJob", r, body);
   }
+
   return r.json();
 }
 
@@ -168,14 +211,16 @@ export async function getJobWithRetry(
     try {
       const r = await fetchWithTimeout(
         `${apiBase()}/v1/jobs/${id}`,
-        { method: "GET", headers: { "Accept": "application/json" }, cache: "no-store" },
+        { method: "GET", headers: { Accept: "application/json" }, cache: "no-store" },
         timeoutMs,
         signal
       );
+
       if (!r.ok) {
         const body = await jsonOrText(r);
         httpError("getJobWithRetry", r, body);
       }
+
       return r.json();
     } catch (err) {
       if (signal?.aborted) throw err;
@@ -185,17 +230,16 @@ export async function getJobWithRetry(
     }
   }
 }
+
 export async function createCheckout(plan: "creator" | "pro") {
-  const res = await fetch(
-    `${process.env.NEXT_PUBLIC_API_BASE}/v1/billing/checkout`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ plan }),
-    }
-  );
+  const res = await fetch(`${apiBase()}/v1/billing/checkout`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(await authHeaders()),
+    },
+    body: JSON.stringify({ plan }),
+  });
 
   if (!res.ok) {
     const text = await res.text();
