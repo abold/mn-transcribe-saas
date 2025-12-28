@@ -1,5 +1,5 @@
 substitutions:
-  _IMAGE: "europe-west6-docker.pkg.dev/$PROJECT_ID/mn-transcribe/worker:latest"
+  _IMAGE: "europe-west6-docker.pkg.dev/clever-courier-474119-r9/mn-transcribe/worker:latest"
 
 steps:
   - name: 'gcr.io/cloud-builders/docker'

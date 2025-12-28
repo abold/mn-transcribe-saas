@@ -9,8 +9,9 @@ import logging
 import google.auth
 import google.auth.transport.requests
 from google.cloud import storage
+import stripe
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
 from sqlalchemy import create_engine, text
@@ -80,6 +81,27 @@ GCS_BUCKET = os.getenv("GCS_BUCKET", "")
 DEFAULT_SA_EMAIL = os.getenv("GCS_SIGNER_EMAIL", "")
 
 MAX_DURATION_SEC = float(os.getenv("MAX_DURATION_SEC", "60"))
+
+# Stripe settings
+stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
+
+CREATOR_PRICE_ID = os.getenv("STRIPE_CREATOR_PRICE_ID")
+PRO_PRICE_ID = os.getenv("STRIPE_PRO_PRICE_ID")
+APP_BASE_URL = os.getenv("APP_BASE_URL")
+
+
+def _require_stripe_config():
+    missing = []
+    if not stripe.api_key:
+        missing.append("STRIPE_SECRET_KEY")
+    if not CREATOR_PRICE_ID:
+        missing.append("STRIPE_CREATOR_PRICE_ID")
+    if not PRO_PRICE_ID:
+        missing.append("STRIPE_PRO_PRICE_ID")
+    if not APP_BASE_URL:
+        missing.append("APP_BASE_URL")
+    if missing:
+        raise HTTPException(status_code=500, detail=f"Stripe config missing: {', '.join(missing)}")
 
 
 # ───────────────────────────────
@@ -484,3 +506,63 @@ def get_job(job_id: str):
         "file_url": file_url,
         "srt_url": srt_url,
     }
+
+
+# ───────────────────────────────
+# Stripe Billing
+# ───────────────────────────────
+
+class CheckoutIn(BaseModel):
+    plan: str
+
+@app.post("/v1/billing/checkout")
+def create_checkout_session(body: CheckoutIn):
+    _require_stripe_config()
+
+    plan = body.plan
+    if plan == "creator":
+        price_id = CREATOR_PRICE_ID
+    elif plan == "pro":
+        price_id = PRO_PRICE_ID
+    else:
+        raise HTTPException(status_code=400, detail="Invalid plan")
+
+    session = stripe.checkout.Session.create(
+        mode="subscription",
+        line_items=[{"price": price_id, "quantity": 1}],
+        success_url=f"{APP_BASE_URL}/billing/success",
+        cancel_url=f"{APP_BASE_URL}/billing/cancel",
+    )
+    return {"url": session.url}
+
+
+@app.post("/v1/billing/webhook")
+async def stripe_webhook(request: Request):
+    webhook_secret = os.getenv("STRIPE_WEBHOOK_SECRET")
+    sig = request.headers.get("stripe-signature")
+    if not webhook_secret:
+        raise HTTPException(status_code=500, detail="STRIPE_WEBHOOK_SECRET missing")
+    if not sig:
+        raise HTTPException(status_code=400, detail="Missing stripe-signature header")
+
+    payload = await request.body()
+
+    try:
+        event = stripe.Webhook.construct_event(payload, sig, webhook_secret)
+    except stripe.error.SignatureVerificationError:
+        raise HTTPException(status_code=400, detail="Invalid signature")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid payload")
+
+    # ✅ Now safe to use event
+    if event["type"] == "checkout.session.completed":
+        session = event["data"]["object"]
+        # TODO: save subscription
+
+    elif event["type"] == "customer.subscription.deleted":
+        sub = event["data"]["object"]
+        # TODO: downgrade
+
+    return {"ok": True}
+
+

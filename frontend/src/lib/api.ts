@@ -185,3 +185,22 @@ export async function getJobWithRetry(
     }
   }
 }
+export async function createCheckout(plan: "creator" | "pro") {
+  const res = await fetch(
+    `${process.env.NEXT_PUBLIC_API_BASE}/v1/billing/checkout`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ plan }),
+    }
+  );
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || "Checkout failed");
+  }
+
+  return res.json(); // { url }
+}
