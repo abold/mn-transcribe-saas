@@ -2,16 +2,9 @@
 
 import { useEffect, useRef, useState } from "react";
 import { uploadFile, createJob, getJobWithRetry, createCheckout } from "@/lib/api";
-import { createClient, type Session } from "@supabase/supabase-js";
+import type { Session } from "@supabase/supabase-js";
+import { supabase } from "@/lib/supabaseClient";
 
-// ----------------------------
-// Supabase client (browser-safe)
-// ----------------------------
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
-
-const supabase =
-  supabaseUrl && supabaseAnonKey ? createClient(supabaseUrl, supabaseAnonKey) : null;
 
 export default function Home() {
   // ----------------------------
@@ -88,8 +81,7 @@ export default function Home() {
     setAuthMsg("");
 
     try {
-      // Redirect back to *this exact page* (works on Vercel + your custom domain path)
-      const redirectTo = window.location.href;
+      const redirectTo = `${window.location.origin}/auth/callback`;
 
       const { error } = await supabase.auth.signInWithOtp({
         email,
